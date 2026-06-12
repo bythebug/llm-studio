@@ -55,14 +55,13 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://llm_studio:${POSTGRES_PASSWORD:-changeme}@db:5432/llm_studio
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: sqlite:////mlflow/mlflow.db
       STORAGE_BASE: /app/storage
     volumes:
       - app_storage:/app/storage
+      - mlflow_data:/mlflow
     depends_on:
       db:
-        condition: service_healthy
-      mlflow:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
