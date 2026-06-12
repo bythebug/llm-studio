@@ -167,4 +167,5 @@ def _df_to_pairs(df: pd.DataFrame) -> list[tuple[str, str]]:
 
 def _fix_encoding(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text)
-    return normalized.encode("utf-8", errors="ignore").decode("utf-8")
+    cleaned = normalized.encode("utf-8", errors="ignore").decode("utf-8")
+    return cleaned.replace("\x00", "")   # strip null bytes — invalid in most text contexts

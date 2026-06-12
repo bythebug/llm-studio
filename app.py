@@ -9,6 +9,7 @@ import os
 from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -27,6 +28,7 @@ from llm_studio.inference import predict, predict_batch
 from llm_studio.metrics import confusion_matrix_data
 from llm_studio.mlflow_integration import compare_runs, get_experiment_runs, list_experiments
 from llm_studio.model_loader import list_versions, load_model
+from llm_studio.monitoring import JobMonitor, prometheus_metrics
 from llm_studio.models import FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
 from llm_studio.preprocessor import normalize, tokenize
 
@@ -472,3 +474,28 @@ def compare_experiment_runs(body: CompareRunsRequest):
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+
+_monitors: dict[int, JobMonitor] = {}
+
+
+def _get_monitor(job_id: int) -> JobMonitor:
+    if job_id not in _monitors:
+        _monitors[job_id] = JobMonitor(job_id)
+    return _monitors[job_id]
+
+
+@app.get("/metrics", summary="Prometheus metrics endpoint", include_in_schema=False)
+def metrics():
+    data, content_type = prometheus_metrics()
+    return Response(content=data, media_type=content_type)
+
+
+@app.get("/jobs/{job_id}/monitoring", summary="Latency stats and drift alerts for a job")
+def job_monitoring(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+    return _get_monitor(job_id).summary()
