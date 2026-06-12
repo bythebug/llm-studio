@@ -9,6 +9,7 @@ import os
 from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -29,10 +30,19 @@ from llm_studio.metrics import confusion_matrix_data
 from llm_studio.mlflow_integration import compare_runs, get_experiment_runs, list_experiments
 from llm_studio.model_loader import list_versions, load_model
 from llm_studio.monitoring import JobMonitor, prometheus_metrics
-from llm_studio.models import FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
+from llm_studio.models import ComputeInstance, ComputeStatus, FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
+from llm_studio.remote_runner import test_connection as ssh_test
 from llm_studio.preprocessor import normalize, tokenize
 
 app = FastAPI(title="LLM Studio", version="0.3.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3001", "http://127.0.0.1:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 engine = get_engine(DATABASE_URL)
 create_all(engine)
@@ -499,3 +509,192 @@ def metrics():
 def job_monitoring(job_id: int, session: Session = Depends(get_session)):
     _get_job_or_404(job_id, session)
     return _get_monitor(job_id).summary()
+
+
+# ---------------------------------------------------------------------------
+# Compute instances
+# ---------------------------------------------------------------------------
+
+class AddComputeRequest(BaseModel):
+    name: str
+    host: str
+    port: int = 22
+    username: str
+    key_path: Optional[str] = None
+
+
+def _instance_to_dict(inst: ComputeInstance) -> dict:
+    return {
+        "id": inst.id,
+        "name": inst.name,
+        "host": inst.host,
+        "port": inst.port,
+        "username": inst.username,
+        "key_path": inst.key_path,
+        "last_status": inst.last_status.value,
+        "last_checked": inst.last_checked.isoformat() if inst.last_checked else None,
+        "created_at": inst.created_at.isoformat(),
+    }
+
+
+@app.post("/compute", summary="Register a compute instance", status_code=201)
+def add_compute(body: AddComputeRequest, session: Session = Depends(get_session)):
+    inst = ComputeInstance(
+        name=body.name,
+        host=body.host,
+        port=body.port,
+        username=body.username,
+        key_path=body.key_path,
+    )
+    session.add(inst)
+    session.commit()
+    session.refresh(inst)
+    return _instance_to_dict(inst)
+
+
+@app.get("/compute", summary="List compute instances")
+def list_compute(session: Session = Depends(get_session)):
+    instances = session.query(ComputeInstance).order_by(ComputeInstance.created_at).all()
+    return {"instances": [_instance_to_dict(i) for i in instances]}
+
+
+@app.get("/compute/{instance_id}", summary="Get a compute instance")
+def get_compute(instance_id: int, session: Session = Depends(get_session)):
+    inst = session.get(ComputeInstance, instance_id)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Compute instance {instance_id} not found")
+    return _instance_to_dict(inst)
+
+
+@app.post("/compute/{instance_id}/test", summary="Test SSH connection to a compute instance")
+def test_compute(instance_id: int, session: Session = Depends(get_session)):
+    from datetime import datetime, timezone
+    inst = session.get(ComputeInstance, instance_id)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Compute instance {instance_id} not found")
+
+    success, message = ssh_test(inst.host, inst.port, inst.username, inst.key_path)
+    inst.last_status = ComputeStatus.connected if success else ComputeStatus.error
+    inst.last_checked = datetime.now(timezone.utc)
+    session.commit()
+
+    return {
+        "instance_id": instance_id,
+        "success": success,
+        "message": message,
+        "status": inst.last_status.value,
+    }
+
+
+@app.delete("/compute/{instance_id}", summary="Remove a compute instance", status_code=204)
+def delete_compute(instance_id: int, session: Session = Depends(get_session)):
+    inst = session.get(ComputeInstance, instance_id)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Compute instance {instance_id} not found")
+    session.delete(inst)
+    session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Remote training trigger
+# ---------------------------------------------------------------------------
+
+class StartTrainingRequest(BaseModel):
+    compute_id: Optional[int] = None   # None = run locally
+
+
+@app.post("/jobs/{job_id}/start_training_remote", summary="Start training on a specific compute instance")
+def start_training_remote(
+    job_id: int,
+    body: StartTrainingRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    job = _get_job_or_404(job_id, session)
+
+    if job.status == JobStatus.training:
+        raise HTTPException(status_code=409, detail="Job is already training")
+    if job.status == JobStatus.completed:
+        raise HTTPException(status_code=409, detail="Job already completed. Create a new job to retrain.")
+    if not session.query(TrainingData).filter_by(job_id=job_id).first():
+        raise HTTPException(status_code=422, detail="No training data uploaded for this job")
+
+    if body.compute_id is None:
+        # Fall back to local training
+        background_tasks.add_task(_run_training, job_id)
+        return {"job_id": job_id, "compute": "local", "message": "Training started locally"}
+
+    inst = session.get(ComputeInstance, body.compute_id)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Compute instance {body.compute_id} not found")
+
+    background_tasks.add_task(_run_remote_training, job_id, body.compute_id)
+    return {
+        "job_id": job_id,
+        "compute": "remote",
+        "instance": inst.name,
+        "host": inst.host,
+        "message": f"Training started on {inst.name} ({inst.host})",
+    }
+
+
+def _run_remote_training(job_id: int, compute_id: int) -> None:
+    """Background task: trains on a remote instance via SSH."""
+    from datetime import datetime, timezone
+    from sqlalchemy.orm import sessionmaker
+    from llm_studio.config import DEFAULT_TRAINING_CONFIG, DEFAULT_STORAGE_CONFIG
+    from llm_studio.data_loader import load_training_data
+    from llm_studio.models import ModelVersion
+    from llm_studio.remote_runner import RemoteRunner
+
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        job = session.get(FineTuningJob, job_id)
+        inst = session.get(ComputeInstance, compute_id)
+        job.status = JobStatus.training
+        session.commit()
+
+        data = load_training_data(job_id, session)
+        training_data = [{"input": inp, "output": out} for inp, out in data]
+
+        config = DEFAULT_TRAINING_CONFIG
+        config_dict = {**config.__dict__, "model_name": job.model_name}
+
+        local_output = DEFAULT_STORAGE_CONFIG.model_path(job_id, 1)
+        log_entries = []
+
+        def log_cb(msg: str):
+            log_entries.append({"timestamp": datetime.now(timezone.utc).isoformat(),
+                                 "level": "info", "message": msg})
+
+        runner = RemoteRunner(
+            host=inst.host,
+            port=inst.port,
+            username=inst.username,
+            key_path=inst.key_path,
+            log_callback=log_cb,
+        )
+        runner.run(job_id, training_data, config_dict, local_output)
+
+        # Record model version
+        session.add(ModelVersion(
+            job_id=job_id, version_num=1,
+            model_path=local_output, loss=None,
+        ))
+        job.status = JobStatus.completed
+        session.commit()
+
+        # Persist logs
+        import json as _json, os as _os
+        log_dir = _os.path.join(DEFAULT_STORAGE_CONFIG.base_dir, "logs", f"job_{job_id}")
+        _os.makedirs(log_dir, exist_ok=True)
+        with open(_os.path.join(log_dir, "training.json"), "w") as f:
+            _json.dump({"job_id": job_id, "logs": log_entries, "metrics": {}}, f, indent=2)
+
+    except Exception as exc:
+        job.status = JobStatus.failed
+        session.commit()
+        raise
+    finally:
+        session.close()

@@ -34,14 +34,15 @@ services:
                --backend-store-uri sqlite:///mlflow.db
                --default-artifact-root /mlflow/artifacts"
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
       - mlflow_data:/mlflow
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 15s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
   # ---------------------------------------------------------------------------
   # LLM Studio API
@@ -63,6 +64,20 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Next.js)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - app
 
   # ---------------------------------------------------------------------------
   # Prometheus

@@ -18,6 +18,12 @@ class JobStatus(enum.Enum):
     failed = "failed"
 
 
+class ComputeStatus(enum.Enum):
+    unknown = "unknown"
+    connected = "connected"
+    error = "error"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -85,6 +91,20 @@ class Prediction(Base):
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     job = relationship("FineTuningJob", back_populates="predictions")
+
+
+class ComputeInstance(Base):
+    __tablename__ = "compute_instances"
+
+    id          = Column(Integer, primary_key=True)
+    name        = Column(String(100), nullable=False)
+    host        = Column(String(255), nullable=False)
+    port        = Column(Integer, default=22, nullable=False)
+    username    = Column(String(100), nullable=False)
+    key_path    = Column(String(500), nullable=True)   # path to SSH private key on the server
+    last_status = Column(Enum(ComputeStatus), default=ComputeStatus.unknown, nullable=False)
+    last_checked = Column(DateTime, nullable=True)
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 def get_engine(database_url: str):

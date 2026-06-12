@@ -28,3 +28,4 @@ build/
 !README.md
 !TRAINING_GUIDE.md
 !API_DOCS.md
+.gstack/

@@ -57,6 +57,21 @@ CREATE TABLE predictions (
 
 CREATE INDEX idx_predictions_job_id ON predictions(job_id);
 
+-- Compute instances (remote SSH GPU machines)
+CREATE TYPE compute_status AS ENUM ('unknown', 'connected', 'error');
+
+CREATE TABLE compute_instances (
+    id           SERIAL PRIMARY KEY,
+    name         VARCHAR(100) NOT NULL,
+    host         VARCHAR(255) NOT NULL,
+    port         INTEGER      NOT NULL DEFAULT 22,
+    username     VARCHAR(100) NOT NULL,
+    key_path     VARCHAR(500),
+    last_status  compute_status NOT NULL DEFAULT 'unknown',
+    last_checked TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
 -- Auto-update updated_at on fine_tuning_jobs
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
