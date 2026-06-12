@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ChevronLeft, RefreshCw, Play, AlertCircle, Trophy, Activity, Server } from "lucide-react";
+import { ChevronLeft, RefreshCw, Play, AlertCircle, Trophy, Activity, Server, Download } from "lucide-react";
 import {
   getJobStatus, startTrainingRemote, getJobLogs, uploadData, getDataPreview, getDataStats,
   getMetrics, predict, predictBatch, getModels, getModelComparison, getMonitoring,
@@ -228,7 +228,17 @@ export default function JobDetail() {
                 {job.model_versions.map(v => (
                   <div key={v.version} className="flex items-center justify-between py-3 text-sm">
                     <span className="font-medium text-gray-900">v{v.version}</span>
-                    <span className="text-gray-500">{v.loss != null ? `val loss: ${v.loss.toFixed(4)}` : "—"}</span>
+                    <div className="flex items-center gap-4">
+                      <span className="text-gray-500">{v.loss != null ? `val loss: ${v.loss.toFixed(4)}` : "—"}</span>
+                      <a
+                        href={`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/jobs/${job.job_id}/models/${v.version}/download`}
+                        download
+                        className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors"
+                      >
+                        <Download size={11} />
+                        Download
+                      </a>
+                    </div>
                   </div>
                 ))}
               </div>

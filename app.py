@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -455,6 +455,41 @@ def get_confusion_matrix(version_id: int, session: Session = Depends(get_session
         "version_num": version.version_num,
         **cm_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# Model download
+# ---------------------------------------------------------------------------
+
+@app.get("/jobs/{job_id}/models/{version_num}/download", summary="Download a trained model version as a zip archive")
+def download_model(job_id: int, version_num: int, session: Session = Depends(get_session)):
+    import io
+    import zipfile
+
+    _get_job_or_404(job_id, session)
+    version = session.query(ModelVersion).filter_by(job_id=job_id, version_num=version_num).first()
+    if not version:
+        raise HTTPException(status_code=404, detail=f"Version {version_num} not found for job {job_id}")
+
+    model_dir = version.model_path
+    if not os.path.isdir(model_dir):
+        raise HTTPException(status_code=404, detail="Model artifacts not found on disk — has training completed?")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(model_dir):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, model_dir)
+                zf.write(full_path, arcname)
+    buf.seek(0)
+
+    filename = f"llm-studio-job{job_id}-v{version_num}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 # ---------------------------------------------------------------------------
