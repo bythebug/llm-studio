@@ -15,6 +15,7 @@ A full-stack platform for fine-tuning large language models. Upload training dat
 - **Monitoring** — Prometheus metrics, latency percentiles (p50/p95/p99), confidence drift detection, full prediction audit log
 - **Frontend** — Next.js dashboard: job management, data upload, live loss curves, training logs, inference playground, compute instance management
 - **Sample jobs** — one-click "Load Samples" seeds two pre-loaded jobs (translation + summarisation) with training data ready to go
+- **Model download** — download any trained model version as a zip archive; standard HuggingFace checkpoint, usable anywhere
 - **Deployment** — Docker Compose stack (6 services) + AWS ECR/ECS deploy script
 
 ---
@@ -106,7 +107,7 @@ llm-studio/
 │   ├── test_mlflow.py            # 16 tests — param/metric/artifact logging
 │   ├── test_edge_cases.py        # 31 tests — empty data, unicode, long text, null bytes
 │   └── test_integration.py       # 9 tests  — full pipeline, status transitions
-├── app.py                        # FastAPI application (25 endpoints)
+├── app.py                        # FastAPI application (28 endpoints)
 ├── docker-compose.yml            # 6-service stack
 ├── Dockerfile                    # Python 3.11-slim API image
 ├── prometheus.yml
@@ -275,6 +276,7 @@ Full reference: [API_DOCS.md](API_DOCS.md)
 | Inference | `/jobs/{id}/predict` | POST | Single prediction |
 | Inference | `/jobs/{id}/predict_batch` | POST | Batch predictions |
 | Inference | `/jobs/{id}/models` | GET | List versions + cache status |
+| Download | `/jobs/{id}/models/{version}/download` | GET | Download model version as zip |
 | Compute | `/compute` | POST | Register SSH instance |
 | Compute | `/compute` | GET | List instances |
 | Compute | `/compute/{id}/test` | POST | Test SSH connection |
@@ -331,6 +333,32 @@ input_text,expected_output
   {"input": "Summarize: Long article...", "output": "Short summary."}
 ]
 ```
+
+---
+
+## Using a Downloaded Model
+
+After training, open the job's Overview tab and click **Download** next to any model version. You get a zip containing a standard HuggingFace checkpoint.
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("./llm-studio-job1-v1/")
+model = AutoModelForCausalLM.from_pretrained("./llm-studio-job1-v1/")
+
+inputs = tokenizer("Translate to French: Hello", return_tensors="pt")
+output = model.generate(**inputs, max_new_tokens=32)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
+```
+
+Or push directly to the HuggingFace Hub:
+
+```python
+model.push_to_hub("your-org/your-fine-tuned-model")
+tokenizer.push_to_hub("your-org/your-fine-tuned-model")
+```
+
+The zip contains: model weights, tokenizer files, architecture config, and a `training_args.json` snapshot of the hyperparameters and best validation loss.
 
 ---
 
