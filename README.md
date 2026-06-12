@@ -1,6 +1,6 @@
 # LLM Studio
 
-A production-ready backend system for fine-tuning large language models. Upload training data, run a training job, evaluate results, and serve predictions — all through a REST API with experiment tracking and production monitoring built in.
+A full-stack platform for fine-tuning large language models. Upload training data, run training jobs locally or on a remote GPU over SSH, evaluate results, and serve predictions — with a Next.js dashboard, REST API, experiment tracking, and production monitoring built in.
 
 ---
 
@@ -8,11 +8,13 @@ A production-ready backend system for fine-tuning large language models. Upload 
 
 - **Data ingestion** — upload CSV or JSON training pairs with validation, cleaning, and 80/10/10 splitting
 - **Fine-tuning** — full PyTorch training loop with AdamW + warmup/cosine LR scheduling, gradient clipping, and gradient accumulation
+- **Remote compute** — SSH into any GPU machine; training data and script are uploaded automatically, logs stream back live, model artifacts are downloaded when done
 - **Experiment tracking** — every run logged to MLflow: hyperparameters, per-epoch metrics, model artifacts
 - **Evaluation** — BLEU, perplexity, accuracy, F1, confusion matrix; statistical significance testing across versions
 - **Inference** — single and batch prediction with LRU model cache and per-token confidence scoring
 - **Monitoring** — Prometheus metrics, latency percentiles (p50/p95/p99), confidence drift detection, full prediction audit log
-- **Deployment** — Docker Compose stack + AWS ECR/ECS deploy script
+- **Frontend** — Next.js dashboard: job management, data upload, live loss curves, training logs, inference playground, compute instance management
+- **Deployment** — Docker Compose stack (6 services) + AWS ECR/ECS deploy script
 
 ---
 
@@ -20,33 +22,41 @@ A production-ready backend system for fine-tuning large language models. Upload 
 
 | Layer | Technology |
 |---|---|
-| API | FastAPI 0.136, Uvicorn |
-| ML | PyTorch 2.12, HuggingFace Transformers 5.12 |
-| Database | PostgreSQL (prod) / SQLite (dev), SQLAlchemy 2.0 |
-| Experiment tracking | MLflow 3.13 (SQLite backend) |
+| Frontend | Next.js 15, React 19, Tailwind CSS, lucide-react |
+| API | FastAPI 0.136, Uvicorn, Pydantic v2 |
+| ML | PyTorch 2.12, HuggingFace Transformers 5.12, Accelerate |
+| Remote compute | paramiko (SSH + SFTP) |
+| Database | PostgreSQL 16 (prod) / SQLite (dev), SQLAlchemy 2.0 |
+| Experiment tracking | MLflow 3.13 |
 | Metrics | Prometheus client, Grafana |
-| Data | Pandas 3.0, NLTK, sacreBLEU |
+| Data | Pandas, NLTK, sacreBLEU |
 | Evaluation | scikit-learn 1.9, SciPy 1.17 |
-| Testing | pytest, 141 tests across 7 files |
-| Deployment | Docker, AWS ECR + ECS |
+| Testing | pytest — 141 tests across 7 files |
+| Deployment | Docker Compose, AWS ECR + ECS |
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        FastAPI  (app.py)                     │
-├────────────┬─────────────┬──────────────┬────────────────────┤
-│ Job Mgmt   │ Data Upload │  Evaluation  │ Inference          │
-├────────────┴─────────────┴──────────────┴────────────────────┤
-│              Training Pipeline  (trainer.py)                 │
-│   PyTorch loop · AdamW · LR scheduler · MLflow logging       │
-├──────────────────────┬───────────────────────────────────────┤
-│  PostgreSQL / SQLite │  MLflow (experiments + artifacts)     │
-├──────────────────────┴───────────────────────────────────────┤
-│         Prometheus metrics  ←  Grafana dashboards            │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                   Next.js Frontend  (:3001)                     │
+│  Jobs · Data · Training · Evaluation · Inference · Compute      │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ REST
+┌───────────────────────────▼─────────────────────────────────────┐
+│                    FastAPI  (app.py)  (:8000)                    │
+├──────────┬──────────┬───────────┬─────────────┬─────────────────┤
+│ Job Mgmt │   Data   │ Inference │ Experiments │ Compute (SSH)   │
+├──────────┴──────────┴───────────┴─────────────┴─────────────────┤
+│           Training Pipeline  (trainer.py / remote_runner.py)    │
+│    Local: PyTorch loop · AdamW · MLflow logging                 │
+│    Remote: paramiko SSH → SFTP upload → stream logs → download  │
+├─────────────────────────┬───────────────────────────────────────┤
+│  PostgreSQL / SQLite    │  MLflow  (:5001)                      │
+├─────────────────────────┴───────────────────────────────────────┤
+│         Prometheus  (:9090)  ←  Grafana dashboards  (:3000)     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -55,53 +65,55 @@ A production-ready backend system for fine-tuning large language models. Upload 
 
 ```
 llm-studio/
+├── frontend/                     # Next.js dashboard
+│   ├── app/
+│   │   ├── page.tsx              # Jobs list
+│   │   ├── jobs/[id]/page.tsx    # Job detail (6 tabs)
+│   │   ├── compute/page.tsx      # SSH compute instances
+│   │   ├── experiments/page.tsx  # MLflow experiments
+│   │   └── layout.tsx            # Nav + footer
+│   ├── components/
+│   │   ├── LossCurveChart.tsx
+│   │   └── StatusBadge.tsx
+│   └── lib/api.ts                # Typed fetch wrappers
 ├── llm_studio/
-│   ├── models.py             # SQLAlchemy ORM — User, FineTuningJob, TrainingData,
-│   │                         #   ModelVersion, Prediction
-│   ├── config.py             # Base models registry, TrainingConfig, StorageConfig, MLflow
-│   ├── data_loader.py        # CSV/JSON ingestion, cleaning, validation, 80/10/10 split
-│   ├── preprocessor.py       # Normalize → tokenize → encode → pad pipeline
-│   ├── trainer.py            # Training loop with MLflow integration
-│   ├── loss_functions.py     # Cross-entropy (causal LM shift), perplexity, MetricsTracker
-│   ├── optimizer.py          # AdamW with param splitting + warmup/cosine scheduler
-│   ├── evaluator.py          # Run model on test set, persist results as JSON
-│   ├── metrics.py            # BLEU, accuracy, F1, confusion matrix, interpretation guides
-│   ├── comparator.py         # Rank versions, Welch's t-test significance
-│   ├── model_loader.py       # LRU in-memory cache (OrderedDict, max 3 models)
-│   ├── inference.py          # Greedy decode, batch inference, per-token confidence
-│   ├── mlflow_integration.py # ExperimentTracker context manager + query helpers
-│   └── monitoring.py         # Prometheus counters/histograms, DriftDetector, PredictionLogger
+│   ├── models.py                 # SQLAlchemy ORM — User, FineTuningJob, TrainingData,
+│   │                             #   ModelVersion, Prediction, ComputeInstance
+│   ├── config.py                 # Base models registry, TrainingConfig, StorageConfig
+│   ├── data_loader.py            # CSV/JSON ingestion, cleaning, validation, split
+│   ├── preprocessor.py           # Normalize → tokenize → encode → pad pipeline
+│   ├── trainer.py                # Training loop with MLflow integration
+│   ├── loss_functions.py         # Cross-entropy (causal LM shift), perplexity
+│   ├── optimizer.py              # AdamW with param splitting + warmup/cosine scheduler
+│   ├── evaluator.py              # Run model on test set, persist results as JSON
+│   ├── metrics.py                # BLEU, accuracy, F1, confusion matrix
+│   ├── comparator.py             # Rank versions, Welch's t-test significance
+│   ├── model_loader.py           # LRU in-memory cache (OrderedDict, max 3 models)
+│   ├── inference.py              # Greedy decode, batch inference, per-token confidence
+│   ├── mlflow_integration.py     # ExperimentTracker context manager + query helpers
+│   ├── monitoring.py             # Prometheus counters/histograms, DriftDetector
+│   ├── remote_runner.py          # paramiko SSH: upload → stream → download artifacts
+│   └── scripts/
+│       └── remote_train.py       # Self-contained training script run on remote GPU
 ├── db/
-│   └── schema.sql            # PostgreSQL DDL — tables, indexes, updated_at trigger
+│   └── schema.sql                # PostgreSQL DDL — tables, indexes, updated_at trigger
 ├── tests/
-│   ├── test_data_loading.py  # 27 tests — CSV/JSON loading, split, tokenization
-│   ├── test_training.py      # 13 tests — training loop, loss, checkpointing
-│   ├── test_evaluation.py    # 27 tests — metrics, comparison, significance
-│   ├── test_inference.py     # 18 tests — prediction, LRU cache, latency < 100ms
-│   ├── test_mlflow.py        # 16 tests — param/metric/artifact logging
-│   ├── test_edge_cases.py    # 31 tests — empty data, unicode, long text, null bytes
-│   └── test_integration.py   # 9 tests  — full pipeline, status transitions
-├── app.py                    # FastAPI application (19 endpoints)
-├── docker-compose.yml        # PostgreSQL + MLflow + App + Prometheus + Grafana
-├── Dockerfile
+│   ├── test_data_loading.py      # 27 tests — CSV/JSON loading, split, tokenization
+│   ├── test_training.py          # 13 tests — training loop, loss, checkpointing
+│   ├── test_evaluation.py        # 27 tests — metrics, comparison, significance
+│   ├── test_inference.py         # 18 tests — prediction, LRU cache, latency < 100ms
+│   ├── test_mlflow.py            # 16 tests — param/metric/artifact logging
+│   ├── test_edge_cases.py        # 31 tests — empty data, unicode, long text, null bytes
+│   └── test_integration.py       # 9 tests  — full pipeline, status transitions
+├── app.py                        # FastAPI application (25 endpoints)
+├── docker-compose.yml            # 6-service stack
+├── Dockerfile                    # Python 3.11-slim API image
 ├── prometheus.yml
-├── deploy.sh                 # AWS ECR → ECS deploy with pre-flight test run
-├── TRAINING_GUIDE.md         # Data prep, hyperparameter tuning, loss curve guide
-├── API_DOCS.md               # Full endpoint reference with request/response examples
+├── deploy.sh                     # AWS ECR → ECS deploy with pre-flight tests
+├── TRAINING_GUIDE.md
+├── API_DOCS.md
 └── requirements.txt
 ```
-
----
-
-## Supported Base Models
-
-| Model | HuggingFace ID | Context | Family |
-|---|---|---|---|
-| `gpt2` | `gpt2` | 1024 tokens | Causal LM |
-| `gpt2-medium` | `gpt2-medium` | 1024 tokens | Causal LM |
-| `llama-3-8b` | `meta-llama/Meta-Llama-3-8B` | 8192 tokens | Causal LM |
-| `mistral-7b` | `mistralai/Mistral-7B-v0.1` | 4096 tokens | Causal LM |
-| `t5-small` | `t5-small` | 512 tokens | Seq2Seq |
 
 ---
 
@@ -125,21 +137,16 @@ uvicorn app:app --reload
 ### Docker — full stack
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 | Service | URL |
 |---|---|
+| Frontend | http://localhost:3001 |
 | API | http://localhost:8000 |
-| MLflow UI | http://localhost:5000 |
+| MLflow UI | http://localhost:5001 |
 | Prometheus | http://localhost:9090 |
 | Grafana | http://localhost:3000 (admin / admin) |
-
-### Apply database schema (PostgreSQL)
-
-```bash
-psql $DATABASE_URL < db/schema.sql
-```
 
 ---
 
@@ -157,9 +164,15 @@ curl -X POST http://localhost:8000/jobs/1/upload_data \
   -F "file=@training_data.csv"
 # → {"rows_added": 500}
 
-# 3. Start training (runs in background)
-curl -X POST http://localhost:8000/jobs/1/start_training
-# → {"message": "Training started"}
+# 3a. Start training locally
+curl -X POST http://localhost:8000/jobs/1/start_training_remote \
+  -H "Content-Type: application/json" \
+  -d '{"compute_id": null}'
+
+# 3b. Or train on a remote GPU (register instance first via /compute)
+curl -X POST http://localhost:8000/jobs/1/start_training_remote \
+  -H "Content-Type: application/json" \
+  -d '{"compute_id": 1}'
 
 # 4. Check status + live loss curves
 curl http://localhost:8000/jobs/1/status
@@ -178,14 +191,52 @@ curl -X POST http://localhost:8000/jobs/1/predict \
 
 ---
 
+## Remote Compute
+
+Register any SSH-accessible machine as a compute backend:
+
+```bash
+# Register a GPU instance
+curl -X POST http://localhost:8000/compute \
+  -H "Content-Type: application/json" \
+  -d '{"name": "A100 box", "host": "192.168.1.50", "username": "ubuntu", "key_path": "~/.ssh/id_rsa"}'
+
+# Test the connection
+curl -X POST http://localhost:8000/compute/1/test
+# → {"success": true, "message": "Python 3.11.4\npip 23.0"}
+```
+
+**How it works:**
+1. LLM Studio SSHes into the instance using your key
+2. Uploads training data and a self-contained training script via SFTP
+3. Installs PyTorch + Transformers on the remote (cached after first run)
+4. Runs training; logs stream back in real time
+5. Downloads model artifacts back via SFTP when complete
+
+Requirements on the remote: Python 3.8+, pip, internet access for the initial `pip install`.
+
+---
+
+## Supported Base Models
+
+| Model | HuggingFace ID | Context | Family |
+|---|---|---|---|
+| `gpt2` | `gpt2` | 1024 tokens | Causal LM |
+| `gpt2-medium` | `gpt2-medium` | 1024 tokens | Causal LM |
+| `llama-3-8b` | `meta-llama/Meta-Llama-3-8B` | 8192 tokens | Causal LM |
+| `mistral-7b` | `mistralai/Mistral-7B-v0.1` | 4096 tokens | Causal LM |
+| `t5-small` | `t5-small` | 512 tokens | Seq2Seq |
+
+---
+
 ## API Reference
 
-Full reference with request/response examples: [API_DOCS.md](API_DOCS.md)
+Full reference: [API_DOCS.md](API_DOCS.md)
 
 | Category | Endpoint | Method | Description |
 |---|---|---|---|
 | Jobs | `/jobs` | POST | Create job |
-| Jobs | `/jobs/{id}/start_training` | POST | Start training |
+| Jobs | `/jobs/{id}/start_training_remote` | POST | Start training (local or remote) |
 | Jobs | `/jobs/{id}/status` | GET | Status + loss curves |
 | Jobs | `/jobs/{id}/logs` | GET | Training logs |
 | Data | `/jobs/{id}/upload_data` | POST | Upload CSV or JSON |
@@ -197,6 +248,10 @@ Full reference with request/response examples: [API_DOCS.md](API_DOCS.md)
 | Inference | `/jobs/{id}/predict` | POST | Single prediction |
 | Inference | `/jobs/{id}/predict_batch` | POST | Batch predictions |
 | Inference | `/jobs/{id}/models` | GET | List versions + cache status |
+| Compute | `/compute` | POST | Register SSH instance |
+| Compute | `/compute` | GET | List instances |
+| Compute | `/compute/{id}/test` | POST | Test SSH connection |
+| Compute | `/compute/{id}` | DELETE | Remove instance |
 | Experiments | `/experiments` | GET | List MLflow experiments |
 | Experiments | `/experiments/{id}` | GET | Runs in an experiment |
 | Experiments | `/experiments/compare` | POST | Diff runs side-by-side |
@@ -208,18 +263,16 @@ Full reference with request/response examples: [API_DOCS.md](API_DOCS.md)
 ## Running Tests
 
 ```bash
-# Full suite
 venv/bin/pytest tests/ -q
 # 141 passed
 
-# By file
-venv/bin/pytest tests/test_data_loading.py  # Data pipeline (27)
-venv/bin/pytest tests/test_training.py       # Training loop (13)
-venv/bin/pytest tests/test_evaluation.py     # Metrics & comparison (27)
-venv/bin/pytest tests/test_inference.py      # Inference & caching (18)
-venv/bin/pytest tests/test_mlflow.py         # Experiment tracking (16)
-venv/bin/pytest tests/test_edge_cases.py     # Edge cases — unicode, empty, long text (31)
-venv/bin/pytest tests/test_integration.py    # End-to-end pipeline (9)
+venv/bin/pytest tests/test_data_loading.py   # Data pipeline (27)
+venv/bin/pytest tests/test_training.py        # Training loop (13)
+venv/bin/pytest tests/test_evaluation.py      # Metrics & comparison (27)
+venv/bin/pytest tests/test_inference.py       # Inference & caching (18)
+venv/bin/pytest tests/test_mlflow.py          # Experiment tracking (16)
+venv/bin/pytest tests/test_edge_cases.py      # Edge cases (31)
+venv/bin/pytest tests/test_integration.py     # End-to-end pipeline (9)
 ```
 
 ---
@@ -259,8 +312,8 @@ input_text,expected_output
 ```bash
 export AWS_ACCOUNT_ID=123456789012
 export AWS_REGION=us-east-1
-./deploy.sh          # CPU
-./deploy.sh --gpu    # GPU (uses Dockerfile.gpu)
+./deploy.sh        # CPU
+./deploy.sh --gpu  # GPU (uses Dockerfile.gpu)
 ```
 
 The script runs the full test suite, builds and pushes to ECR, registers a new ECS task definition, and waits for the service to stabilise.
