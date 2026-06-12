@@ -95,3 +95,11 @@ DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
     "postgresql://localhost/llm_studio",
 )
+
+
+# ---------------------------------------------------------------------------
+# MLflow
+# ---------------------------------------------------------------------------
+
+MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+MLFLOW_EXPERIMENT_NAME: str = os.getenv("MLFLOW_EXPERIMENT_NAME", "llm-studio")

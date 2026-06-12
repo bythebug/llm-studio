@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from llm_studio.config import DEFAULT_STORAGE_CONFIG, DEFAULT_TRAINING_CONFIG, TrainingConfig
 from llm_studio.data_loader import load_training_data, split_data
 from llm_studio.loss_functions import EpochMetrics, MetricsTracker, cross_entropy_loss, perplexity
+from llm_studio.mlflow_integration import ExperimentTracker
 from llm_studio.models import FineTuningJob, JobStatus, ModelVersion
 from llm_studio.optimizer import build_optimizer, build_scheduler
 
@@ -66,6 +67,7 @@ class Trainer:
         session: Session,
         config: TrainingConfig = DEFAULT_TRAINING_CONFIG,
         storage=DEFAULT_STORAGE_CONFIG,
+        experiment_tracker: Optional[ExperimentTracker] = None,
     ) -> None:
         self.job_id = job_id
         self.session = session
@@ -74,6 +76,7 @@ class Trainer:
         self.tracker = MetricsTracker()
         self.logs: list[dict] = []
         self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        self.mlflow = experiment_tracker or ExperimentTracker(job_id)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -84,63 +87,75 @@ class Trainer:
         self._update_status(job, JobStatus.training)
         self._log(f"Training started on device: {self.device}")
 
-        try:
-            data = load_training_data(self.job_id, self.session)
-            if not data:
-                raise ValueError("No training data found for this job")
+        with self.mlflow:
+            try:
+                self.mlflow.log_params(self.config)
+                self.mlflow.log_metadata(model_name=job.model_name, device=str(self.device))
 
-            split = split_data(data)
-            self._log(f"Data split — train: {len(split.train)}, val: {len(split.val)}, test: {len(split.test)}")
+                data = load_training_data(self.job_id, self.session)
+                if not data:
+                    raise ValueError("No training data found for this job")
 
-            model, tokenizer = self._load_model(job.model_name)
-            model.to(self.device)
+                split = split_data(data)
+                self.mlflow.log_dataset_info(len(split.train), len(split.val), len(split.test))
+                self._log(f"Data split — train: {len(split.train)}, val: {len(split.val)}, test: {len(split.test)}")
 
-            train_loader = self._make_loader(split.train, tokenizer, shuffle=True)
-            val_loader = self._make_loader(split.val, tokenizer, shuffle=False)
+                model, tokenizer = self._load_model(job.model_name)
+                model.to(self.device)
 
-            optimizer = build_optimizer(model, self.config)
-            scheduler = build_scheduler(optimizer, self.config, len(train_loader))
+                train_loader = self._make_loader(split.train, tokenizer, shuffle=True)
+                val_loader = self._make_loader(split.val, tokenizer, shuffle=False)
 
-            best_val_loss = float("inf")
-            best_version = 0
+                optimizer = build_optimizer(model, self.config)
+                scheduler = build_scheduler(optimizer, self.config, len(train_loader))
 
-            for epoch in range(1, self.config.epochs + 1):
-                self._log(f"Epoch {epoch}/{self.config.epochs} — training")
-                train_loss = self._train_epoch(model, train_loader, optimizer, scheduler)
+                best_val_loss = float("inf")
+                best_version = 0
+                best_model_path: Optional[str] = None
 
-                self._log(f"Epoch {epoch} — validating")
-                val_loss = self._validate(model, val_loader)
+                for epoch in range(1, self.config.epochs + 1):
+                    self._log(f"Epoch {epoch}/{self.config.epochs} — training")
+                    train_loss = self._train_epoch(model, train_loader, optimizer, scheduler)
 
-                current_lr = scheduler.get_last_lr()[0]
-                metrics = EpochMetrics(
-                    epoch=epoch,
-                    train_loss=train_loss,
-                    val_loss=val_loss,
-                    train_perplexity=perplexity(train_loss),
-                    val_perplexity=perplexity(val_loss),
-                    lr=current_lr,
-                )
-                self.tracker.record(metrics)
-                self._log(
-                    f"Epoch {epoch} complete — "
-                    f"train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, lr={current_lr:.2e}"
-                )
+                    self._log(f"Epoch {epoch} — validating")
+                    val_loss = self._validate(model, val_loader)
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_version += 1
-                    self._save_checkpoint(model, tokenizer, best_version, val_loss)
-                    self._log(f"New best model saved as v{best_version} (val_loss={val_loss:.4f})")
+                    current_lr = scheduler.get_last_lr()[0]
+                    metrics = EpochMetrics(
+                        epoch=epoch,
+                        train_loss=train_loss,
+                        val_loss=val_loss,
+                        train_perplexity=perplexity(train_loss),
+                        val_perplexity=perplexity(val_loss),
+                        lr=current_lr,
+                    )
+                    self.tracker.record(metrics)
+                    self.mlflow.log_epoch(epoch, train_loss, val_loss, current_lr)
+                    self._log(
+                        f"Epoch {epoch} complete — "
+                        f"train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, lr={current_lr:.2e}"
+                    )
 
-            self._update_status(job, JobStatus.completed)
-            self._log("Training complete")
-            self._persist_logs()
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_version += 1
+                        self._save_checkpoint(model, tokenizer, best_version, val_loss)
+                        best_model_path = self.storage.model_path(self.job_id, best_version)
+                        self._log(f"New best model saved as v{best_version} (val_loss={val_loss:.4f})")
 
-        except Exception as exc:
-            self._update_status(job, JobStatus.failed)
-            self._log(f"Training failed: {exc}", level="error")
-            self._persist_logs()
-            raise
+                self.mlflow.log_final_metrics({"best_val_loss": best_val_loss, "best_version": best_version})
+                if best_model_path:
+                    self.mlflow.log_model_artifact(best_model_path)
+
+                self._update_status(job, JobStatus.completed)
+                self._log("Training complete")
+                self._persist_logs()
+
+            except Exception as exc:
+                self._update_status(job, JobStatus.failed)
+                self._log(f"Training failed: {exc}", level="error")
+                self._persist_logs()
+                raise
 
     # ------------------------------------------------------------------
     # Epoch-level methods

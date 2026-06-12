@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from llm_studio.comparator import compare_versions
-from llm_studio.config import BASE_MODELS, DATABASE_URL, DEFAULT_STORAGE_CONFIG
+from llm_studio.config import BASE_MODELS, DATABASE_URL, DEFAULT_STORAGE_CONFIG, MLFLOW_TRACKING_URI
 from llm_studio.data_loader import (
     clean_data,
     load_from_csv,
@@ -25,6 +25,7 @@ from llm_studio.data_loader import (
 from llm_studio.evaluator import load_eval_result
 from llm_studio.inference import predict, predict_batch
 from llm_studio.metrics import confusion_matrix_data
+from llm_studio.mlflow_integration import compare_runs, get_experiment_runs, list_experiments
 from llm_studio.model_loader import list_versions, load_model
 from llm_studio.models import FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
 from llm_studio.preprocessor import normalize, tokenize
@@ -434,3 +435,40 @@ def get_models(job_id: int, session: Session = Depends(get_session)):
     if not versions:
         raise HTTPException(status_code=404, detail="No trained model versions found for this job.")
     return {"job_id": job_id, "versions": versions}
+
+
+# ---------------------------------------------------------------------------
+# MLflow experiment tracking
+# ---------------------------------------------------------------------------
+
+@app.get("/experiments", summary="List all MLflow experiments")
+def get_experiments():
+    try:
+        experiments = list_experiments(MLFLOW_TRACKING_URI)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"MLflow unavailable: {exc}")
+    return {"experiments": experiments}
+
+
+@app.get("/experiments/{experiment_id}", summary="Runs within an experiment")
+def get_experiment(experiment_id: str):
+    try:
+        runs = get_experiment_runs(experiment_id, MLFLOW_TRACKING_URI)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"experiment_id": experiment_id, "runs": runs}
+
+
+class CompareRunsRequest(BaseModel):
+    run_ids: list[str]
+
+
+@app.post("/experiments/compare", summary="Compare hyperparameters and metrics across runs")
+def compare_experiment_runs(body: CompareRunsRequest):
+    if len(body.run_ids) < 2:
+        raise HTTPException(status_code=422, detail="Provide at least 2 run_ids to compare.")
+    try:
+        result = compare_runs(body.run_ids, MLFLOW_TRACKING_URI)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return result
