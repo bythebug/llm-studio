@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.*
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Markdown — only README.md is tracked
+*.md
+!README.md
