@@ -1,5 +1,5 @@
 """
-REST API for LLM Studio: job management, data upload, training control.
+REST API for LLM Studio: job management, data upload, training control, evaluation.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Uplo
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from llm_studio.comparator import compare_versions
 from llm_studio.config import BASE_MODELS, DATABASE_URL, DEFAULT_STORAGE_CONFIG
 from llm_studio.data_loader import (
     clean_data,
@@ -21,7 +22,9 @@ from llm_studio.data_loader import (
     split_data,
     validate_training_data,
 )
-from llm_studio.models import FineTuningJob, JobStatus, TrainingData, User, create_all, get_engine
+from llm_studio.evaluator import load_eval_result
+from llm_studio.metrics import confusion_matrix_data
+from llm_studio.models import FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
 from llm_studio.preprocessor import normalize, tokenize
 
 app = FastAPI(title="LLM Studio", version="0.2.0")
@@ -246,4 +249,100 @@ def data_stats(
             "val": len(split.val),
             "test": len(split.test),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+@app.get("/jobs/{job_id}/metrics", summary="Evaluation metrics for all versions of a job")
+def job_metrics(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+
+    versions = session.query(ModelVersion).filter_by(job_id=job_id).all()
+    if not versions:
+        raise HTTPException(status_code=404, detail="No model versions found. Run training first.")
+
+    results = []
+    for v in versions:
+        eval_data = load_eval_result(job_id, v.version_num)
+        results.append({
+            "version_num": v.version_num,
+            "model_path": v.model_path,
+            "training_loss": v.loss,
+            "training_accuracy": v.accuracy,
+            "evaluation": eval_data or "not evaluated yet — POST /jobs/{id}/evaluate to run",
+        })
+
+    return {"job_id": job_id, "versions": results}
+
+
+@app.get("/jobs/{job_id}/model_comparison", summary="Compare all evaluated versions for a job")
+def model_comparison(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+
+    versions = session.query(ModelVersion).filter_by(job_id=job_id).all()
+    eval_results = [
+        load_eval_result(job_id, v.version_num)
+        for v in versions
+        if load_eval_result(job_id, v.version_num) is not None
+    ]
+
+    if len(eval_results) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="At least 2 evaluated versions required for comparison.",
+        )
+
+    comparison = compare_versions(job_id, eval_results)
+    return {
+        "job_id": job_id,
+        "best_version": comparison.best_version,
+        "primary_metric": comparison.primary_metric,
+        "recommendation": comparison.recommendation,
+        "ranking": comparison.ranking,
+        "significance": [
+            {
+                "versions": f"v{s.version_a} vs v{s.version_b}",
+                "metric": s.metric,
+                "significant": s.significant,
+                "better_version": s.better_version,
+                "p_value": s.p_value,
+            }
+            for s in comparison.significance
+        ],
+    }
+
+
+@app.get("/models/{version_id}/confusion_matrix", summary="Confusion matrix data for a model version")
+def get_confusion_matrix(version_id: int, session: Session = Depends(get_session)):
+    version = session.get(ModelVersion, version_id)
+    if not version:
+        raise HTTPException(status_code=404, detail=f"ModelVersion {version_id} not found")
+
+    eval_data = load_eval_result(version.job_id, version.version_num)
+    if not eval_data:
+        raise HTTPException(status_code=404, detail="No evaluation results found for this version.")
+
+    if eval_data.get("task_type") != "classification":
+        raise HTTPException(status_code=422, detail="Confusion matrix is only available for classification tasks.")
+
+    per_class = eval_data["metrics"].get("per_class", {})
+    labels = list(per_class.keys())
+
+    # Reconstruct predictions from sample data if full matrix not stored
+    sample_preds = eval_data.get("sample_predictions", [])
+    if sample_preds:
+        y_true = [p["expected"] for p in sample_preds]
+        y_pred = [p["predicted"] for p in sample_preds]
+        cm_data = confusion_matrix_data(y_true, y_pred, labels)
+    else:
+        cm_data = {"labels": labels, "matrix": []}
+
+    return {
+        "version_id": version_id,
+        "job_id": version.job_id,
+        "version_num": version.version_num,
+        **cm_data,
     }
