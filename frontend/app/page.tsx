@@ -5,6 +5,14 @@ import Link from "next/link";
 import { Plus, RefreshCw, AlertCircle } from "lucide-react";
 import { createJob, getBaseModels, getJobStatus, type BaseModel, type JobStatus } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+
+const FALLBACK_MODELS: BaseModel[] = [
+  { id: "gpt2",        hf_id: "gpt2",                            max_tokens: 1024, family: "causal-lm" },
+  { id: "gpt2-medium", hf_id: "gpt2-medium",                     max_tokens: 1024, family: "causal-lm" },
+  { id: "llama-3-8b",  hf_id: "meta-llama/Meta-Llama-3-8B",      max_tokens: 8192, family: "causal-lm" },
+  { id: "mistral-7b",  hf_id: "mistralai/Mistral-7B-v0.1",       max_tokens: 4096, family: "causal-lm" },
+  { id: "t5-small",    hf_id: "t5-small",                         max_tokens: 512,  family: "seq2seq"   },
+];
 const KNOWN_JOB_IDS_KEY = "llm_studio_job_ids";
 
 function loadJobIds(): number[] {
@@ -20,7 +28,7 @@ function saveJobId(id: number) {
 
 export default function Dashboard() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
-  const [baseModels, setBaseModels] = useState<BaseModel[]>([]);
+  const [baseModels, setBaseModels] = useState<BaseModel[]>(FALLBACK_MODELS);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -43,10 +51,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchJobs();
-    getBaseModels().then(r => {
-      setBaseModels(r.models);
-      if (r.models.length) setModel(r.models[0].id);
-    }).catch(() => {});
+    getBaseModels()
+      .then(r => { if (r.models.length) setBaseModels(r.models); })
+      .catch(() => { /* fallback list stays */ });
   }, []);
 
   const handleCreate = async () => {
