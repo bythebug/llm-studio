@@ -28,6 +28,14 @@ export const getBaseModels = () => req<{ models: BaseModel[] }>("/base-models");
 export const createJob = (user_id: number, model_name: string) =>
   req("/jobs", { method: "POST", body: JSON.stringify({ user_id, model_name }) });
 
+export const deleteJob = async (id: number) => {
+  const res = await fetch(`${BASE}/jobs/${id}`, { method: "DELETE" });
+  if (!res.ok) { const d = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(d.detail); }
+};
+
+export const loadSampleJobs = () =>
+  req<{ jobs: { job_id: number; model_name: string; description: string; rows: number }[] }>("/sample-jobs", { method: "POST" });
+
 export const startTraining = (id: number) =>
   req(`/jobs/${id}/start_training`, { method: "POST" });
 

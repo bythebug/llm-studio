@@ -30,7 +30,7 @@ from llm_studio.metrics import confusion_matrix_data
 from llm_studio.mlflow_integration import compare_runs, get_experiment_runs, list_experiments
 from llm_studio.model_loader import list_versions, load_model
 from llm_studio.monitoring import JobMonitor, prometheus_metrics
-from llm_studio.models import ComputeInstance, ComputeStatus, FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
+from llm_studio.models import ComputeInstance, ComputeStatus, FineTuningJob, JobStatus, ModelVersion, Prediction, TrainingData, User, create_all, get_engine
 from llm_studio.remote_runner import test_connection as ssh_test
 from llm_studio.preprocessor import normalize, tokenize
 
@@ -144,6 +144,81 @@ def create_job(body: CreateJobRequest, session: Session = Depends(get_session)):
     session.commit()
     session.refresh(job)
     return {"job_id": job.id, "status": job.status.value, "model_name": job.model_name}
+
+
+@app.delete("/jobs/{job_id}", summary="Delete a job and all its data", status_code=204)
+def delete_job(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+    session.query(TrainingData).filter_by(job_id=job_id).delete()
+    session.query(Prediction).filter_by(job_id=job_id).delete()
+    session.query(ModelVersion).filter_by(job_id=job_id).delete()
+    session.query(FineTuningJob).filter_by(id=job_id).delete()
+    session.commit()
+
+
+_SAMPLE_DATA = {
+    "gpt2": {
+        "description": "English to French translation",
+        "pairs": [
+            ("Translate to French: Hello", "Bonjour"),
+            ("Translate to French: Goodbye", "Au revoir"),
+            ("Translate to French: Thank you", "Merci"),
+            ("Translate to French: Please", "S'il vous plaît"),
+            ("Translate to French: Yes", "Oui"),
+            ("Translate to French: No", "Non"),
+            ("Translate to French: Good morning", "Bonjour"),
+            ("Translate to French: Good night", "Bonne nuit"),
+            ("Translate to French: How are you?", "Comment allez-vous?"),
+            ("Translate to French: My name is", "Je m'appelle"),
+            ("Translate to French: I love you", "Je t'aime"),
+            ("Translate to French: Where is the station?", "Où est la gare?"),
+        ],
+    },
+    "t5-small": {
+        "description": "Text summarisation",
+        "pairs": [
+            ("Summarize: The quick brown fox jumps over the lazy dog near the river bank.", "Fox jumps over dog."),
+            ("Summarize: Artificial intelligence is transforming industries across the globe at an unprecedented pace.", "AI is rapidly transforming industries."),
+            ("Summarize: The stock market experienced significant volatility today due to inflation concerns.", "Markets volatile on inflation fears."),
+            ("Summarize: Scientists have discovered a new species of deep-sea fish in the Pacific Ocean.", "New deep-sea fish species found."),
+            ("Summarize: The government announced a new policy to reduce carbon emissions by 50% by 2030.", "Government targets 50% emission cut by 2030."),
+            ("Summarize: Researchers at MIT developed a new battery that charges in under five minutes.", "MIT creates fast-charging battery."),
+            ("Summarize: The annual rainfall this year has been the highest recorded in the past century.", "Record rainfall this year."),
+            ("Summarize: A local startup raised 10 million dollars in its latest funding round.", "Startup raises $10M in funding."),
+            ("Summarize: The new smartphone model features a camera with 200 megapixels resolution.", "New phone has 200MP camera."),
+            ("Summarize: Health experts recommend at least 30 minutes of exercise every day for adults.", "Adults should exercise 30 min daily."),
+            ("Summarize: The ancient ruins were discovered by a team of archaeologists in southern Italy.", "Ruins found in southern Italy."),
+            ("Summarize: Electric vehicles now account for 15 percent of all new car sales globally.", "EVs are 15% of global new car sales."),
+        ],
+    },
+}
+
+
+@app.post("/sample-jobs", summary="Create two sample fine-tuning jobs with pre-loaded training data", status_code=201)
+def create_sample_jobs(session: Session = Depends(get_session)):
+    # Ensure a sample user exists
+    user = session.query(User).filter_by(email="sample@llm-studio.dev").first()
+    if not user:
+        user = User(email="sample@llm-studio.dev")
+        session.add(user)
+        session.flush()
+
+    created = []
+    for model_id, sample in _SAMPLE_DATA.items():
+        job = FineTuningJob(user_id=user.id, model_name=model_id)
+        session.add(job)
+        session.flush()
+        for inp, out in sample["pairs"]:
+            session.add(TrainingData(job_id=job.id, input=inp, expected_output=out))
+        session.commit()
+        created.append({
+            "job_id": job.id,
+            "model_name": model_id,
+            "description": sample["description"],
+            "rows": len(sample["pairs"]),
+        })
+
+    return {"jobs": created}
 
 
 @app.post("/jobs/{job_id}/start_training", summary="Start training for a job")

@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Plus, RefreshCw, AlertCircle } from "lucide-react";
-import { createJob, getBaseModels, getJobStatus, type BaseModel, type JobStatus } from "@/lib/api";
+import { Plus, RefreshCw, AlertCircle, Trash2, FlaskConical } from "lucide-react";
+import { createJob, deleteJob, loadSampleJobs, getBaseModels, getJobStatus, type BaseModel, type JobStatus } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 
 const FALLBACK_MODELS: BaseModel[] = [
@@ -32,6 +32,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [loadingSamples, setLoadingSamples] = useState(false);
   const [model, setModel] = useState("gpt2");
   const [userId, setUserId] = useState("1");
 
@@ -70,6 +71,26 @@ export default function Dashboard() {
     }
   };
 
+  const handleLoadSamples = async () => {
+    setLoadingSamples(true);
+    setApiError("");
+    try {
+      const res = await loadSampleJobs() as { jobs: { job_id: number }[] };
+      res.jobs.forEach(j => saveJobId(j.job_id));
+      await fetchJobs();
+    } catch (e: unknown) { setApiError((e as Error).message); }
+    finally { setLoadingSamples(false); }
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      await deleteJob(id);
+      const ids = loadJobIds().filter(i => i !== id);
+      localStorage.setItem(KNOWN_JOB_IDS_KEY, JSON.stringify(ids));
+      setJobs(j => j.filter(j => j.job_id !== id));
+    } catch (e: unknown) { setApiError((e as Error).message); }
+  };
+
   const stats = {
     total: jobs.length,
     training: jobs.filter(j => j.status === "training").length,
@@ -86,9 +107,16 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold text-gray-900">Jobs</h1>
           <p className="text-gray-500 text-sm mt-0.5">Manage LLM fine-tuning jobs</p>
         </div>
-        <button onClick={fetchJobs} className="text-gray-400 hover:text-gray-600 transition-colors p-2  hover:bg-gray-100">
-          <RefreshCw size={16} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleLoadSamples} disabled={loadingSamples}
+            className="flex items-center gap-1.5 border border-gray-200 text-gray-500 hover:text-gray-800 hover:bg-gray-50 transition-colors px-3 py-1.5 text-xs font-medium disabled:opacity-40">
+            <FlaskConical size={13} />
+            {loadingSamples ? "Loading…" : "Load Samples"}
+          </button>
+          <button onClick={fetchJobs} className="text-gray-400 hover:text-gray-600 transition-colors p-2 hover:bg-gray-100">
+            <RefreshCw size={16} />
+          </button>
+        </div>
       </div>
 
       {/* API error banner */}
@@ -184,9 +212,15 @@ export default function Dashboard() {
                   <td className="px-6 py-4 text-gray-500">{job.model_versions?.length ?? 0}</td>
                   <td className="px-6 py-4 text-gray-400 text-xs">{new Date(job.updated_at).toLocaleString()}</td>
                   <td className="px-6 py-4 text-right">
-                    <Link href={`/jobs/${job.job_id}`} className="text-blue-600 hover:text-blue-800 text-xs font-medium">
-                      Open →
-                    </Link>
+                    <div className="flex items-center justify-end gap-3">
+                      <Link href={`/jobs/${job.job_id}`} className="text-blue-600 hover:text-blue-800 text-xs font-medium">
+                        Open →
+                      </Link>
+                      <button onClick={() => handleDelete(job.job_id)}
+                        className="text-gray-300 hover:text-red-500 transition-colors">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
