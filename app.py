@@ -106,6 +106,25 @@ def _run_training(job_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Base models
+# ---------------------------------------------------------------------------
+
+@app.get("/base-models", summary="List available base models for fine-tuning")
+def list_base_models():
+    return {
+        "models": [
+            {
+                "id": model_id,
+                "hf_id": meta["hf_id"],
+                "max_tokens": meta["max_tokens"],
+                "family": meta["family"],
+            }
+            for model_id, meta in BASE_MODELS.items()
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
 # Job management
 # ---------------------------------------------------------------------------
 

@@ -3,10 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Plus, RefreshCw, AlertCircle } from "lucide-react";
-import { createJob, getJobStatus, type JobStatus } from "@/lib/api";
+import { createJob, getBaseModels, getJobStatus, type BaseModel, type JobStatus } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
-
-const MODELS = ["gpt2", "gpt2-medium", "llama-3-8b", "mistral-7b", "t5-small"];
 const KNOWN_JOB_IDS_KEY = "llm_studio_job_ids";
 
 function loadJobIds(): number[] {
@@ -22,6 +20,7 @@ function saveJobId(id: number) {
 
 export default function Dashboard() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const [baseModels, setBaseModels] = useState<BaseModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -42,7 +41,13 @@ export default function Dashboard() {
     }
   };
 
-  useEffect(() => { fetchJobs(); }, []);
+  useEffect(() => {
+    fetchJobs();
+    getBaseModels().then(r => {
+      setBaseModels(r.models);
+      if (r.models.length) setModel(r.models[0].id);
+    }).catch(() => {});
+  }, []);
 
   const handleCreate = async () => {
     setCreating(true);
@@ -122,7 +127,11 @@ export default function Dashboard() {
               onChange={e => setModel(e.target.value)}
               className="border border-gray-300  px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             >
-              {MODELS.map(m => <option key={m}>{m}</option>)}
+              {baseModels.map(m => (
+                <option key={m.id} value={m.id} title={`${m.hf_id} · ${m.max_tokens} tokens · ${m.family}`}>
+                  {m.id}
+                </option>
+              ))}
             </select>
           </div>
           <button

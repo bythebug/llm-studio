@@ -12,6 +12,17 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// ── Base models ─────────────────────────────────────────────────────────────
+
+export interface BaseModel {
+  id: string;
+  hf_id: string;
+  max_tokens: number;
+  family: string;
+}
+
+export const getBaseModels = () => req<{ models: BaseModel[] }>("/base-models");
+
 // ── Jobs ────────────────────────────────────────────────────────────────────
 
 export const createJob = (user_id: number, model_name: string) =>
