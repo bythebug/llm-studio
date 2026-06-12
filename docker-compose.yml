@@ -1,6 +1,26 @@
 services:
 
   # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: llm_studio
+      POSTGRES_USER: llm_studio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llm_studio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
   # MLflow tracking server
   # ---------------------------------------------------------------------------
   mlflow:
@@ -33,12 +53,14 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///app.db
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - STORAGE_BASE=/app/storage
+      DATABASE_URL: postgresql://llm_studio:${POSTGRES_PASSWORD:-changeme}@db:5432/llm_studio
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      STORAGE_BASE: /app/storage
     volumes:
       - app_storage:/app/storage
     depends_on:
+      db:
+        condition: service_healthy
       mlflow:
         condition: service_healthy
 
@@ -65,14 +87,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
 
 volumes:
+  postgres_data:
   mlflow_data:
   app_storage:
   prometheus_data:

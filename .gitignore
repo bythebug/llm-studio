@@ -23,6 +23,8 @@ dist/
 build/
 *.egg-info/
 
-# Markdown — only README.md is tracked
+# Markdown — project docs tracked; personal notes gitignored
 *.md
 !README.md
+!TRAINING_GUIDE.md
+!API_DOCS.md
