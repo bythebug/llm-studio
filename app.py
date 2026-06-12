@@ -1,12 +1,12 @@
 """
-REST API for LLM Studio: job management, data upload, training control, evaluation.
+REST API for LLM Studio: job management, data upload, training control, evaluation, inference.
 """
 from __future__ import annotations
 
 import io
 import json
 import os
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -23,11 +23,13 @@ from llm_studio.data_loader import (
     validate_training_data,
 )
 from llm_studio.evaluator import load_eval_result
+from llm_studio.inference import predict, predict_batch
 from llm_studio.metrics import confusion_matrix_data
+from llm_studio.model_loader import list_versions, load_model
 from llm_studio.models import FineTuningJob, JobStatus, ModelVersion, TrainingData, User, create_all, get_engine
 from llm_studio.preprocessor import normalize, tokenize
 
-app = FastAPI(title="LLM Studio", version="0.2.0")
+app = FastAPI(title="LLM Studio", version="0.3.0")
 
 engine = get_engine(DATABASE_URL)
 create_all(engine)
@@ -346,3 +348,89 @@ def get_confusion_matrix(version_id: int, session: Session = Depends(get_session
         "version_num": version.version_num,
         **cm_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
+
+class PredictRequest(BaseModel):
+    input: str
+    version: Optional[int] = None   # None → best available version
+    max_new_tokens: int = 128
+
+
+class PredictBatchRequest(BaseModel):
+    inputs: list[str]
+    version: Optional[int] = None
+    max_new_tokens: int = 128
+
+
+@app.post("/jobs/{job_id}/predict", summary="Single prediction from a trained model")
+def predict_single(
+    job_id: int,
+    body: PredictRequest,
+    session: Session = Depends(get_session),
+):
+    _get_job_or_404(job_id, session)
+    try:
+        entry = load_model(job_id, session, version_num=body.version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    result = predict(entry.model, entry.tokenizer, body.input, max_new_tokens=body.max_new_tokens)
+    return {
+        "job_id": job_id,
+        "version_num": entry.version_num,
+        "input": body.input,
+        "output": result.output,
+        "confidence": result.confidence,
+        "input_token_count": result.input_token_count,
+        "output_token_count": result.output_token_count,
+        "latency_ms": result.latency_ms,
+    }
+
+
+@app.post("/jobs/{job_id}/predict_batch", summary="Batch predictions from a trained model")
+def predict_batch_endpoint(
+    job_id: int,
+    body: PredictBatchRequest,
+    session: Session = Depends(get_session),
+):
+    _get_job_or_404(job_id, session)
+    if not body.inputs:
+        raise HTTPException(status_code=422, detail="inputs list cannot be empty")
+
+    try:
+        entry = load_model(job_id, session, version_num=body.version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    batch_result = predict_batch(
+        entry.model, entry.tokenizer, body.inputs, max_new_tokens=body.max_new_tokens
+    )
+    return {
+        "job_id": job_id,
+        "version_num": entry.version_num,
+        "total_latency_ms": batch_result.total_latency_ms,
+        "avg_latency_ms": batch_result.avg_latency_ms,
+        "predictions": [
+            {
+                "input": inp,
+                "output": r.output,
+                "confidence": r.confidence,
+                "input_token_count": r.input_token_count,
+                "output_token_count": r.output_token_count,
+            }
+            for inp, r in zip(body.inputs, batch_result.results)
+        ],
+    }
+
+
+@app.get("/jobs/{job_id}/models", summary="List available model versions for a job")
+def get_models(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+    versions = list_versions(job_id, session)
+    if not versions:
+        raise HTTPException(status_code=404, detail="No trained model versions found for this job.")
+    return {"job_id": job_id, "versions": versions}
