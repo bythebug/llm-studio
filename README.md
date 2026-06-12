@@ -217,15 +217,36 @@ Requirements on the remote: Python 3.8+, pip, internet access for the initial `p
 
 ---
 
-## Supported Base Models
+## Base Models
 
-| Model | HuggingFace ID | Context | Family |
+You never upload a base model. When training starts, HuggingFace's `from_pretrained` checks the local cache first, then downloads from huggingface.co if needed. The downloaded model is cached on disk so subsequent runs are instant.
+
+| Model | HuggingFace ID | Context | Auth required |
 |---|---|---|---|
-| `gpt2` | `gpt2` | 1024 tokens | Causal LM |
-| `gpt2-medium` | `gpt2-medium` | 1024 tokens | Causal LM |
-| `llama-3-8b` | `meta-llama/Meta-Llama-3-8B` | 8192 tokens | Causal LM |
-| `mistral-7b` | `mistralai/Mistral-7B-v0.1` | 4096 tokens | Causal LM |
-| `t5-small` | `t5-small` | 512 tokens | Seq2Seq |
+| `gpt2` | `gpt2` | 1024 tokens | None |
+| `gpt2-medium` | `gpt2-medium` | 1024 tokens | None |
+| `t5-small` | `t5-small` | 512 tokens | None |
+| `llama-3-8b` | `meta-llama/Meta-Llama-3-8B` | 8192 tokens | HF token + Meta approval |
+| `mistral-7b` | `mistralai/Mistral-7B-v0.1` | 4096 tokens | HF token + Mistral approval |
+
+For gated models set `HUGGING_FACE_HUB_TOKEN` in your environment before starting training.
+
+### Adding a new base model
+
+Edit **one file** — `llm_studio/config.py`:
+
+```python
+BASE_MODELS = {
+    ...
+    "phi-3-mini": {
+        "hf_id": "microsoft/Phi-3-mini-4k-instruct",
+        "max_tokens": 4096,
+        "family": "causal-lm",
+    },
+}
+```
+
+The `GET /base-models` endpoint reads directly from this dict, and the frontend dropdown fetches it on load — nothing else to change.
 
 ---
 
@@ -235,6 +256,7 @@ Full reference: [API_DOCS.md](API_DOCS.md)
 
 | Category | Endpoint | Method | Description |
 |---|---|---|---|
+| Models | `/base-models` | GET | List available base models |
 | Jobs | `/jobs` | POST | Create job |
 | Jobs | `/jobs/{id}/start_training_remote` | POST | Start training (local or remote) |
 | Jobs | `/jobs/{id}/status` | GET | Status + loss curves |
