@@ -14,6 +14,7 @@ A full-stack platform for fine-tuning large language models. Upload training dat
 - **Inference** — single and batch prediction with LRU model cache and per-token confidence scoring
 - **Monitoring** — Prometheus metrics, latency percentiles (p50/p95/p99), confidence drift detection, full prediction audit log
 - **Frontend** — Next.js dashboard: job management, data upload, live loss curves, training logs, inference playground, compute instance management
+- **Sample jobs** — one-click "Load Samples" seeds two pre-loaded jobs (translation + summarisation) with training data ready to go
 - **Deployment** — Docker Compose stack (6 services) + AWS ECR/ECS deploy script
 
 ---
@@ -148,6 +149,8 @@ docker compose up -d
 | Prometheus | http://localhost:9090 |
 | Grafana | http://localhost:3000 (admin / admin) |
 
+> `NEXT_PUBLIC_API_URL` is passed as a Docker build arg (default `http://localhost:8000`) and baked into the frontend bundle at build time. If you run the API on a different port, update the `args` value in `docker-compose.yml` and rebuild the frontend image.
+
 ---
 
 ## Training Pipeline Walkthrough
@@ -261,6 +264,8 @@ Full reference: [API_DOCS.md](API_DOCS.md)
 | Jobs | `/jobs/{id}/start_training_remote` | POST | Start training (local or remote) |
 | Jobs | `/jobs/{id}/status` | GET | Status + loss curves |
 | Jobs | `/jobs/{id}/logs` | GET | Training logs |
+| Jobs | `/jobs/{id}` | DELETE | Delete job and all its data |
+| Samples | `/sample-jobs` | POST | Seed two sample jobs with training data |
 | Data | `/jobs/{id}/upload_data` | POST | Upload CSV or JSON |
 | Data | `/jobs/{id}/data_preview` | GET | First N rows |
 | Data | `/jobs/{id}/data_stats` | GET | Row count, vocab size, split sizes |
