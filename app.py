@@ -1,17 +1,18 @@
 """
-REST API for training data management.
+REST API for LLM Studio: job management, data upload, training control.
 """
 from __future__ import annotations
 
 import io
 import json
+import os
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
-from fastapi.responses import JSONResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from llm_studio.config import DATABASE_URL
+from llm_studio.config import BASE_MODELS, DATABASE_URL, DEFAULT_STORAGE_CONFIG
 from llm_studio.data_loader import (
     clean_data,
     load_from_csv,
@@ -20,10 +21,10 @@ from llm_studio.data_loader import (
     split_data,
     validate_training_data,
 )
-from llm_studio.models import FineTuningJob, TrainingData, create_all, get_engine
-from llm_studio.preprocessor import PreprocessingPipeline, tokenize, normalize
+from llm_studio.models import FineTuningJob, JobStatus, TrainingData, User, create_all, get_engine
+from llm_studio.preprocessor import normalize, tokenize
 
-app = FastAPI(title="LLM Studio", version="0.1.0")
+app = FastAPI(title="LLM Studio", version="0.2.0")
 
 engine = get_engine(DATABASE_URL)
 create_all(engine)
@@ -41,6 +42,15 @@ def get_session():
         yield session
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Request/response schemas
+# ---------------------------------------------------------------------------
+
+class CreateJobRequest(BaseModel):
+    user_id: int
+    model_name: str
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +74,107 @@ def _persist_pairs(job_id: int, pairs: list[tuple[str, str]], session: Session) 
     return len(rows)
 
 
+def _run_training(job_id: int) -> None:
+    """Background task: creates its own DB session and runs the trainer."""
+    from sqlalchemy.orm import sessionmaker
+    from llm_studio.trainer import train_model
+
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        train_model(job_id, session)
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
-# Endpoints
+# Job management
+# ---------------------------------------------------------------------------
+
+@app.post("/jobs", summary="Create a new fine-tuning job", status_code=201)
+def create_job(body: CreateJobRequest, session: Session = Depends(get_session)):
+    if body.model_name not in BASE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model '{body.model_name}'. Available: {list(BASE_MODELS)}",
+        )
+    user = session.get(User, body.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User {body.user_id} not found")
+
+    job = FineTuningJob(user_id=body.user_id, model_name=body.model_name)
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return {"job_id": job.id, "status": job.status.value, "model_name": job.model_name}
+
+
+@app.post("/jobs/{job_id}/start_training", summary="Start training for a job")
+def start_training(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    job = _get_job_or_404(job_id, session)
+
+    if job.status == JobStatus.training:
+        raise HTTPException(status_code=409, detail="Job is already training")
+    if job.status == JobStatus.completed:
+        raise HTTPException(status_code=409, detail="Job already completed. Create a new job to retrain.")
+
+    if not session.query(TrainingData).filter_by(job_id=job_id).first():
+        raise HTTPException(status_code=422, detail="No training data uploaded for this job")
+
+    background_tasks.add_task(_run_training, job_id)
+    return {"job_id": job_id, "message": "Training started"}
+
+
+@app.get("/jobs/{job_id}/status", summary="Training status and loss curves")
+def job_status(job_id: int, session: Session = Depends(get_session)):
+    job = _get_job_or_404(job_id, session)
+
+    log_path = os.path.join(
+        DEFAULT_STORAGE_CONFIG.base_dir, "logs", f"job_{job_id}", "training.json"
+    )
+    loss_curves = {}
+    if os.path.exists(log_path):
+        with open(log_path) as f:
+            data = json.load(f)
+            loss_curves = data.get("metrics", {})
+
+    versions = [
+        {"version": v.version_num, "loss": v.loss, "accuracy": v.accuracy, "path": v.model_path}
+        for v in job.model_versions
+    ]
+
+    return {
+        "job_id": job_id,
+        "model_name": job.model_name,
+        "status": job.status.value,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "model_versions": versions,
+        "loss_curves": loss_curves,
+    }
+
+
+@app.get("/jobs/{job_id}/logs", summary="Training logs")
+def job_logs(job_id: int, session: Session = Depends(get_session)):
+    _get_job_or_404(job_id, session)
+
+    log_path = os.path.join(
+        DEFAULT_STORAGE_CONFIG.base_dir, "logs", f"job_{job_id}", "training.json"
+    )
+    if not os.path.exists(log_path):
+        return {"job_id": job_id, "logs": []}
+
+    with open(log_path) as f:
+        data = json.load(f)
+    return {"job_id": job_id, "logs": data.get("logs", [])}
+
+
+# ---------------------------------------------------------------------------
+# Data management
 # ---------------------------------------------------------------------------
 
 @app.post("/jobs/{job_id}/upload_data", summary="Upload training data (CSV or JSON)")
@@ -123,10 +232,7 @@ def data_stats(
 
     inputs = [inp for inp, _ in pairs]
     outputs = [out for _, out in pairs]
-
     all_tokens = [tok for text in inputs + outputs for tok in tokenize(normalize(text))]
-    vocab_size = len(set(all_tokens))
-
     split = split_data(pairs)
 
     return {
@@ -134,7 +240,7 @@ def data_stats(
         "num_rows": len(pairs),
         "avg_input_length": round(sum(len(t) for t in inputs) / len(inputs), 1),
         "avg_output_length": round(sum(len(t) for t in outputs) / len(outputs), 1),
-        "vocab_size": vocab_size,
+        "vocab_size": len(set(all_tokens)),
         "split": {
             "train": len(split.train),
             "val": len(split.val),
